@@ -3,4 +3,3 @@ uvicorn
 scikit-learn
 pandas
 numpy
-pickle
