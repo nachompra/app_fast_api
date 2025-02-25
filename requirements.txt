@@ -1,6 +1,5 @@
 fastapi
 uvicorn
-sqlite3
 scikit-learn
 pandas
 numpy
