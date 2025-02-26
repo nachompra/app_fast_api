@@ -7,6 +7,8 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error
+from typing import List
+from sklearn.pipeline import Pipeline
 
 app = FastAPI()
 
@@ -15,9 +17,7 @@ with open("data/advertising_model.pkl", "rb") as model_file:
 
 
 class PredictRequest(BaseModel):
-    tv: float
-    radio: float
-    newspaper: float
+    data: List[List[float]]  
 
 @app.get("/")
 def home():
@@ -27,48 +27,55 @@ def home():
 # 1. Endpoint de predicción
 @app.post("/v1/predict")
 async def predict(request: PredictRequest):
-    tv = request.tv
-    radio = request.radio
-    newspaper = request.newspaper
-
-    prediction = model.predict([[tv, radio, newspaper]])[0]
-    return {"Sales prediction": round(prediction, 2)}
-
+    try:
+        for entry in request.data:
+            if len(entry) != 3:
+                raise HTTPException(status_code=400, detail="Cada entrada debe tener exactamente 3 valores (tv, radio, newspaper).")
+        
+        predictions = model.predict(request.data)
+        
+        return {"Sales prediction": [round(pred, 2) for pred in predictions]}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al realizar la predicción: {str(e)}")
 
 # 2. Endpoint de ingesta de datos
+
 class Invest(BaseModel):
     TV: float
     newspaper: float
     radio: float
     sales: float
 
-
 @app.post("/ingest")
-async def add_invest(advertising: Invest):
+async def add_invest(data: dict):
+    investments = [
+        Invest(TV=entry[0], newspaper=entry[1], radio=entry[2], sales=entry[3]) 
+        for entry in data['data']
+    ]
+
     with sqlite3.connect('data/advertising.db') as conn:
         cursor = conn.cursor()
         try:
-            cursor.execute(
+            cursor.executemany(
                 "INSERT INTO advertising (TV, newspaper, radio, sales) VALUES (?, ?, ?, ?)",
-                (advertising.TV, advertising.newspaper, advertising.radio, advertising.sales)
+                [(inv.TV, inv.newspaper, inv.radio, inv.sales) for inv in investments]
             )
-            conn.commit() 
-            invest_id = cursor.lastrowid 
+            conn.commit()
         except Exception as e:
-            conn.rollback() 
-            raise HTTPException(status_code=500, detail=f"Error inserting investment: {str(e)}")
-        
-        return {'message': 'Datos ingresados correctamente'}
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error inserting investments: {str(e)}")
 
+    return {'message': 'Datos ingresados correctamente'}
 
 # 3. Endpoint de reentramiento del modelo
-
-with open("data/advertising_model.pkl", "rb") as model_file:
-    model = pickle.load(model_file)
-
 # MAE base del modelo en producción
 MAE_BASE = 100
-THRESHOLD = 1.2 
+THRESHOLD = 1.2
+
+# Cargar el modelo previamente guardado
+with open("data/advertising_model.pkl", "rb") as model_file:
+    model = pickle.load(model_file)
 
 @app.post("/retrain")
 async def retrain_model():
@@ -78,50 +85,48 @@ async def retrain_model():
             query = "SELECT TV, radio, newspaper, sales FROM advertising"
             df = pd.read_sql(query, conn)
 
-
-        # Dividimos el train/test
-        df_train = df.iloc[:80]  
-        df_test = df.iloc[80:100] 
-        df_new = df.iloc[100:] 
-
-        # Evaluamos modelo con los nuevos datos
-        X_new = df_new[["TV", "radio", "newspaper"]]
-        y_new = df_new["sales"]
-        y_pred_new = model.predict(X_new)
-        new_mae = mean_absolute_error(y_new, y_pred_new)
-
         # Check para que existan suficientes datos
         if df.shape[0] < 100:  
             raise HTTPException(status_code=400, detail="No hay suficientes datos para evaluar el modelo.")
 
-        # Dividimos para entreno
+        # Dividimos en train/test
         X = df[["TV", "radio", "newspaper"]]
         y = df["sales"]
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=7)
 
+        # Si el modelo cargado es un Pipeline, el pipeline se encargará de las transformaciones internamente
+        if isinstance(model, Pipeline):
+            # Aplicamos el pipeline directamente para hacer la predicción
+            y_pred = model.predict(X_test)
+        else:
+            # Si no es un pipeline, usamos el modelo de forma tradicional
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+
+        # Evaluamos el modelo con los nuevos datos
+        new_mae = mean_absolute_error(y_test, y_pred)
+
         # Check si sigue generalizando bien
         if new_mae <= MAE_BASE * THRESHOLD:
-            return {"message": "El modelo sigue siendo válido. No es necesario reentrenar.", "new_MAE": new_mae}
+            return {"message": "El modelo sigue siendo válido. No es necesario reentrenar."}
 
-        # Reentrenamos en caso de que el MAE empeore con nuevos datos
-        X_train = df_train[["TV", "radio", "newspaper"]]
-        y_train = df_train["sales"]
+        # Reentrenamos el modelo
         new_model = LinearRegression()
         new_model.fit(X_train, y_train)
 
-        # Evaluamos con el nuevo entreno
-        y_pred_new_retrain = new_model.predict(X_test)
-        retrained_mae = mean_absolute_error(y_test, y_pred_new_retrain)
+        # Evaluamos con el nuevo entrenamiento
+        y_pred_retrain = new_model.predict(X_test)
+        retrained_mae = mean_absolute_error(y_test, y_pred_retrain)
 
         # Check de MAE
         if retrained_mae > MAE_BASE * THRESHOLD:
-            return {"message": "El modelo reentrenado sigue sin generalizar bien. Considera una nueva modelización.", "retrained_MAE": retrained_mae}
+            return {"message": "El modelo reentrenado sigue sin generalizar bien. Considera una nueva modelización."}
 
-        # Modelo Actualizado
+        # Guardamos el modelo actualizado
         with open("data/advertising_model.pkl", "wb") as model_file:
             pickle.dump(new_model, model_file)
 
-        return {"message": "Modelo reentrenado con éxito.", "retrained_MAE": retrained_mae}
+        return {"message": "Modelo reentrenado correctamente."}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en el reentrenamiento: {str(e)}")
