@@ -68,7 +68,7 @@ with open("data/advertising_model.pkl", "rb") as model_file:
 
 # MAE base del modelo en producción
 MAE_BASE = 100
-THRESHOLD = 1.2  # 20% superior a MAE_BASE
+THRESHOLD = 1.2 
 
 @app.post("/retrain")
 async def retrain_model():
@@ -80,9 +80,9 @@ async def retrain_model():
 
 
         # Dividimos el train/test
-        df_train = df.iloc[:80]  # Primeros 80 registros
-        df_test = df.iloc[80:100]  # Siguientes 20 registros (test del modelo actual)
-        df_new = df.iloc[100:]  # 30 nuevos registros
+        df_train = df.iloc[:80]  
+        df_test = df.iloc[80:100] 
+        df_new = df.iloc[100:] 
 
         # Evaluamos modelo con los nuevos datos
         X_new = df_new[["TV", "radio", "newspaper"]]
@@ -110,8 +110,8 @@ async def retrain_model():
         new_model.fit(X_train, y_train)
 
         # Evaluamos con el nuevo entreno
-        y_pred_new_retrain = new_model.predict(X_new)
-        retrained_mae = mean_absolute_error(y_new, y_pred_new_retrain)
+        y_pred_new_retrain = new_model.predict(X_test)
+        retrained_mae = mean_absolute_error(y_test, y_pred_new_retrain)
 
         # Check de MAE
         if retrained_mae > MAE_BASE * THRESHOLD:
